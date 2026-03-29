@@ -1,0 +1,111 @@
+import pandas as pd
+import numpy as np
+from scipy.optimize import curve_fit, minimize
+
+def run_media_optimization(keyword_files, ltv_file, budget_limit=3000):
+    """
+    Estimates alpha and beta for keywords, then optimizes bids under a budget constraint.
+    """
+    try:
+        # Load LTV and Conversion Rate Data
+        ltv_data = pd.read_csv(ltv_file, index_col='keyword')
+        
+        params = {}
+        
+        # 1. Part A: Estimate alpha and beta for each keyword
+        def click_model(bid, alpha, beta):
+            return alpha * (1 - np.exp(-beta * bid))
+            
+        for kw, file_path in keyword_files.items():
+            df = pd.read_csv(file_path)
+            
+            # Using multiple starting values to avoid local minima as per instructions
+            best_rss = float('inf')
+            best_popt = None
+            
+            # Trying a few heuristic starting points [alpha, beta]
+            start_points = [[150, 0.5], [df['n.clicks'].max(), 0.1], [200, 1.0]]
+            
+            for p0 in start_points:
+                try:
+                    popt, _ = curve_fit(click_model, df['bid.value'], df['n.clicks'], 
+                                        p0=p0, bounds=(0, np.inf), maxfev=5000)
+                    predictions = click_model(df['bid.value'], *popt)
+                    rss = np.sum((df['n.clicks'] - predictions)**2)
+                    
+                    if rss < best_rss:
+                        best_rss = rss
+                        best_popt = popt
+                except:
+                    continue # Skip if curve_fit fails for a specific starting point
+                    
+            params[kw] = {'alpha': best_popt[0], 'beta': best_popt[1]}
+
+        # 2. Part C: Constrained Optimization (Budget = $3000)
+        keywords = list(keyword_files.keys())
+        
+        def objective(bids):
+            # We want to MAXIMIZE profit, so we MINIMIZE negative profit
+            total_profit = 0
+            for i, kw in enumerate(keywords):
+                a = params[kw]['alpha']
+                b = params[kw]['beta']
+                ltv = ltv_data.loc[kw, 'ltv']
+                conv = ltv_data.loc[kw, 'Conv.rate']
+                
+                clicks = click_model(bids[i], a, b)
+                revenue = clicks * conv * ltv
+                cost = clicks * bids[i]
+                total_profit += (revenue - cost)
+            return -total_profit
+
+        def constraint_budget(bids):
+            # Total expenditure must be <= budget_limit
+            total_expenditure = 0
+            for i, kw in enumerate(keywords):
+                a = params[kw]['alpha']
+                b = params[kw]['beta']
+                clicks = click_model(bids[i], a, b)
+                total_expenditure += (clicks * bids[i])
+            return budget_limit - total_expenditure
+
+        # Initial guess for bids
+        x0 = np.array([1.0, 1.0, 1.0, 1.0])
+        bounds = [(0, None) for _ in range(4)]
+        cons = {'type': 'ineq', 'fun': constraint_budget}
+        
+        # Run optimization
+        result = minimize(objective, x0, method='trust-constr', bounds=bounds, constraints=cons)
+        
+        # 3. Format Output
+        final_bids = result.x
+        summary = {}
+        total_spend = 0
+        total_profit = -result.fun
+        
+        for i, kw in enumerate(keywords):
+            a = params[kw]['alpha']
+            b = params[kw]['beta']
+            clicks = click_model(final_bids[i], a, b)
+            spend = clicks * final_bids[i]
+            total_spend += spend
+            
+            summary[kw] = {
+                "alpha_est": round(a, 2),
+                "beta_est": round(b, 4),
+                "optimal_bid": round(final_bids[i], 2),
+                "expected_clicks": round(clicks, 0),
+                "expenditure": round(spend, 2)
+            }
+            
+        return {
+            "status": "SUCCESS",
+            "optimization_successful": result.success,
+            "total_budget_limit": budget_limit,
+            "actual_total_spend": round(total_spend, 2),
+            "total_expected_profit": round(total_profit, 2),
+            "keyword_breakdown": summary
+        }
+
+    except Exception as e:
+        return {"error": f"Optimization failed: {str(e)}"}
