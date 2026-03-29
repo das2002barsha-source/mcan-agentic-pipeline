@@ -1,0 +1,58 @@
+import pandas as pd
+import numpy as np
+
+def run_demographic_analysis(pref_file, demog_file, cluster_file, target_product_index):
+    """
+    Calculates weighted averages and log-lifts to identify segment personas.
+    Assumes base-10 log lifts as per MCAN Part 2 instructions.
+    """
+    try:
+        # Load datasets
+        prefs = pd.read_csv(pref_file)
+        demogs = pd.read_csv(demog_file)
+        cluster_data = pd.read_csv(cluster_file)
+        
+        # Merge demographics into the cluster data for analysis
+        # Assuming the rows align exactly (311 customers)
+        full_data = pd.concat([cluster_data, demogs], axis=1)
+        
+        # The probabilities for the target product (from compensatory model)
+        # In a full pipeline, Agent 1 passes these probabilities down.
+        # For this tool, we assume 'prob_col' contains the target product's purchase probabilities.
+        # *Note: You may need to map the exact column name based on your Agent 1 output.*
+        prob_col = prefs.iloc[:, target_product_index] 
+        
+        results = {}
+        
+        # 1. Calculate Overall Means
+        overall_means = full_data.mean()
+        
+        # 2. Calculate Segment Weighted Averages
+        weighted_sums = full_data.multiply(prob_col, axis=0).sum()
+        sum_of_probs = prob_col.sum()
+        segment_means = weighted_sums / sum_of_probs
+        
+        # 3. Calculate Base-10 Log-Lifts
+        # log10(segment_mean / overall_mean)
+        log_lifts = {}
+        for col in full_data.columns:
+            if overall_means[col] > 0: # Avoid division by zero
+                lift = np.log10(segment_means[col] / overall_means[col])
+                log_lifts[col] = lift
+                
+        # Filter for noteworthy demographics (absolute log-lift > 0.04)
+        demographic_cols = ['income', 'age', 'sports', 'gradschl']
+        noteworthy_demogs = {
+            k: v for k, v in log_lifts.items() 
+            if k in demographic_cols and abs(v) > 0.04
+        }
+        
+        return {
+            "status": "SUCCESS",
+            "segment_size_expected": sum_of_probs,
+            "noteworthy_log_lifts": noteworthy_demogs,
+            "all_log_lifts": log_lifts
+        }
+
+    except Exception as e:
+        return {"error": f"Failed to perform demographic analysis: {str(e)}"}
